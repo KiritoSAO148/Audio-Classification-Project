@@ -1,101 +1,82 @@
-import os
-
-import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, random_split
 import pandas as pd
 import torchaudio
-
+import torch
+from audio_preprocessing import AudioUtil
+import os
+import matplotlib.pyplot as plt
 
 class UrbanSoundDataset(Dataset):
-    def __init__(
-        self,
-        annotations_file,
-        audio_dir,
-        transformation,
-        target_sample_rate,
-        num_samples,
-        device,
-    ):
-        self.annotations = pd.read_csv(annotations_file)
-        self.audio_dir = audio_dir
-        self.device = device
-        self.transformation = transformation.to(self.device)
-        self.target_sample_rate = target_sample_rate
-        self.num_samples = num_samples
+    def __init__(self, df, data_path):
+        self.df = df
+        self.data_path = str(data_path)
+        self.duration = 4000
+        self.sr = 44100
+        self.channel = 2
+        self.shift_pct = 0.4
 
     def __len__(self):
-        return len(self.annotations)
+        return len(self.df)
 
-    def __getitem__(self, index):
-        audio_sample_path = self._get_audio_sample_path(index)
-        label = self._get_audio_sample_label(index)
-        signal, sr = torchaudio.load(audio_sample_path)
-        signal = signal.to(self.device)
-        signal = self._resample_if_necessary(signal, sr)
-        signal = self._mix_down_if_necessary(signal)
-        signal = self._cut_if_necessary(signal)
-        signal = self._right_pad_if_necessary(signal)
-        signal = self.transformation(signal)
-        return signal, label
+    def __getitem__(self, idx):
+        audio_file = self.data_path + self.df.loc[idx, 'relative_path']
+        class_id = self.df.loc[idx, 'classID']
 
-    def _cut_if_necessary(self, signal):
-        if signal.shape[1] > self.num_samples:
-            signal = signal[:, : self.num_samples]
-        return signal
+        aud = AudioUtil.open(audio_file)
+        reaud = AudioUtil.resample(aud, self.sr)
+        rechan = AudioUtil.rechannel(reaud, self.channel)
 
-    def _right_pad_if_necessary(self, signal):
-        length_signal = signal.shape[1]
-        if length_signal < self.num_samples:
-            num_missing_samples = self.num_samples - length_signal
-            last_dim_padding = (0, num_missing_samples)
-            signal = torch.nn.functional.pad(signal, last_dim_padding)
-        return signal
+        dur_aud = AudioUtil.pad_trunc(rechan, self.duration)
+        shift_aud = AudioUtil.time_shift(dur_aud, self.shift_pct)
+        sgram = AudioUtil.spectro_gram(shift_aud, n_mels=64, n_fft=1024, hop_len=None)
+        aug_sgram = AudioUtil.spectro_augment(sgram, max_mask_pct=0.1, n_freq_masks=2, n_time_masks=2)
 
-    def _resample_if_necessary(self, signal, sr):
-        if sr != self.target_sample_rate:
-            resampler = torchaudio.transforms.Resample(sr, self.target_sample_rate).to(
-                self.device
-            )
-            signal = resampler(signal)
-        return signal
+        return aug_sgram, class_id
 
-    def _mix_down_if_necessary(self, signal):
-        if signal.shape[0] > 1:
-            signal = torch.mean(signal, dim=0, keepdim=True)
-        return signal
+def img(train_dl):
+    image_folder = 'image'
+    os.makedirs(image_folder, exist_ok=True)
+    for i, (sgram, class_id) in enumerate(train_dl):
+        for j in range(sgram.size(0)):
+            for k in range(sgram.size(1)):
+                aug_sgram = sgram[j, k].squeeze().numpy()
+                class_label = class_id[j].item()
+                fold = df.loc[i * train_dl.batch_size + j, 'fold']
 
-    def _get_audio_sample_path(self, index):
-        fold = f"fold{self.annotations.iloc[index, 5]}"
-        path = os.path.join(self.audio_dir, fold, self.annotations.iloc[index, 0])
-        return path
+                fold_folder = os.path.join(image_folder, f'fold{fold}')
+                os.makedirs(fold_folder, exist_ok=True)
 
-    def _get_audio_sample_label(self, index):
-        return self.annotations.iloc[index, 6]
+                file_name = f'image_{i}_{j}_{k}.png'
 
+                plt.figure(figsize=(10, 8))
+                plt.imshow(aug_sgram, aspect='auto', origin='lower')
+                plt.xlabel('Time')
+                plt.ylabel('Frequency')
+                plt.title(f'Augmented Spectrogram (Channel: {k+1}, Class: {class_label})')
+                plt.colorbar()
 
-if __name__ == "__main__":
-    ANNOTATIONS_FILE = "D:\\Documents\\CNTT\\Audio Classification\\UrbanSound8K\\metadata\\UrbanSound8K.csv"
-    AUDIO_DIR = "D:\\Documents\\CNTT\\Audio Classification\\UrbanSound8K\\audio"
-    SAMPLE_RATE = 22050
-    NUM_SAMPLES = 22050
+                save_path = os.path.join(fold_folder, file_name)
+                plt.savefig(save_path)
+                plt.close()
+    print("Save success!")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device {device}")
+if __name__ == '__main__':
+    data_path = 'UrbanSound8K'
+    metadata_file = data_path + '/metadata/UrbanSound8K.csv'
+    df = pd.read_csv(metadata_file)
+    df.head()
 
-    mel_spectrogram = torchaudio.transforms.MelSpectrogram(
-        sample_rate=SAMPLE_RATE,
-        n_fft=1024,
-        hop_length=512,
-        n_mels=64,
-    ).to(device)
+    df['relative_path'] = '/fold' + df['fold'].astype(str) + '/' + df['slice_file_name'].astype(str)
+    df.head()
 
-    usd = UrbanSoundDataset(
-        ANNOTATIONS_FILE,
-        AUDIO_DIR,
-        mel_spectrogram,
-        SAMPLE_RATE,
-        NUM_SAMPLES,
-        device,
-    )
-    print(f"There are {len(usd)} samples in the dataset.")
-    signal, label = usd[0]
+    myds = UrbanSoundDataset(df, data_path)
+
+    num_items = len(myds)
+    num_train = round(num_items * 0.8)
+    num_val = num_items - num_train
+    train_ds, val_ds = random_split(myds, [num_train, num_val])
+
+    train_dl = torch.utils.data.DataLoader(train_ds, batch_size=16, shuffle=True)
+    val_dl = torch.utils.data.DataLoader(val_ds, batch_size=16, shuffle=False)
+
+    img(train_dl)
