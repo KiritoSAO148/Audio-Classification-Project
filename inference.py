@@ -1,63 +1,76 @@
 import torch
 import torchaudio
+import pandas as pd
+from torch.utils.data import random_split
 
 from cnn import CNNNetwork
 from urbansounddataset import UrbanSoundDataset
-from train import AUDIO_DIR, ANNOTATIONS_FILE, SAMPLE_RATE, NUM_SAMPLES
 
+label_mapping = {
+    0: 'air_conditioner',
+    1: 'car_horn',
+    2: 'children_playing',
+    3: 'dog_bark',
+    4: 'drilling',
+    5: 'engine_idling',
+    6: 'gun_shot',
+    7: 'jackhammer',
+    8: 'siren',
+    9: 'street_music'
+}
 
-class_mapping = [
-    "air_conditioner",
-    "car_horn",
-    "children_playing",
-    "dog_bark",
-    "drilling",
-    "engine_idling",
-    "gun_shot",
-    "jackhammer",
-    "siren",
-    "street_music"
-]
+def predict(model, test_dl, device, label_mapping):
+    correct_prediction = 0
+    total_prediction = 0
 
-
-def predict(model, input, target, class_mapping):
-    model.eval()
     with torch.no_grad():
-        predictions = model(input)
-        # Tensor (1, 10) -> [ [0.1, 0.01, ..., 0.6] ]
-        predicted_index = predictions[0].argmax(0)
-        predicted = class_mapping[predicted_index]
-        expected = class_mapping[target]
-    return predicted, expected
+        for data in test_dl:
+            inputs, labels = data[0].to(device), data[1].to(device)
 
+            inputs_m, inputs_s = inputs.mean(), inputs.std()
+            inputs = (inputs - inputs_m) / inputs_s
+
+            outputs = model(inputs)
+
+            _, prediction = torch.max(outputs, 1)
+
+            predicted_labels = [label_mapping[p.item()] for p in prediction]
+            actual_labels = [label_mapping[l.item()] for l in labels]
+
+            audio_paths = [df.loc[index, 'relative_path'] for index in test_dl.dataset.indices]
+
+            for audio_path, predicted_label, actual_label in zip(audio_paths, predicted_labels, actual_labels):
+                print(f"Audio Path: {audio_path}, Predicted: {predicted_label}, Actual: {actual_label}")
+
+            correct_prediction += (prediction == labels).sum().item()
+            total_prediction += prediction.shape[0]
+
+    acc = correct_prediction / total_prediction
+    print(f'Accuracy: {acc:.2f}, Total items: {total_prediction}')
 
 if __name__ == "__main__":
-    # load back the model
+    data_path = 'UrbanSound8K'
+    metadata_file = data_path + '/metadata/UrbanSound8K.csv'
+    df = pd.read_csv(metadata_file)
+    df.head()
+
+    df['relative_path'] = '/fold' + df['fold'].astype(str) + '/' + df['slice_file_name'].astype(str)
+    df.head()
+
+    myds = UrbanSoundDataset(df, data_path)
+
+    num_items = len(myds)
+    num_train = round(num_items * 0.8)
+    num_val = num_items - num_train
+    train_ds, val_ds = random_split(myds, [num_train, num_val])
+
+    train_dl = torch.utils.data.DataLoader(train_ds, batch_size=16, shuffle=True)
+    val_dl = torch.utils.data.DataLoader(val_ds, batch_size=16, shuffle=False)
+
     cnn = CNNNetwork()
-    state_dict = torch.load("cnnnet.pth")
-    cnn.load_state_dict(state_dict)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    cnn = cnn.to(device)
+    cnn.load_state_dict(torch.load('cnnnet.pt'))
+    cnn.eval()
 
-    # load urban sound dataset dataset
-    mel_spectrogram = torchaudio.transforms.MelSpectrogram(
-        sample_rate=SAMPLE_RATE,
-        n_fft=1024,
-        hop_length=512,
-        n_mels=64
-    )
-
-    usd = UrbanSoundDataset(ANNOTATIONS_FILE,
-                            AUDIO_DIR,
-                            mel_spectrogram,
-                            SAMPLE_RATE,
-                            NUM_SAMPLES,
-                            "cpu")
-
-
-    # get a sample from the urban sound dataset for inference
-    input, target = usd[587][0], usd[587][1] # [batch size, num_channels, fr, time]
-    input.unsqueeze_(0)
-
-    # make an inference
-    predicted, expected = predict(cnn, input, target,
-                                  class_mapping)
-    print(f"Predicted: '{predicted}', expected: '{expected}'")
+    predict(cnn, val_dl, device, label_mapping)
