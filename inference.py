@@ -2,7 +2,7 @@ import torch
 import torchaudio
 import pandas as pd
 from torch.utils.data import random_split
-
+import itertools
 from cnn import CNNNetwork
 from urbansounddataset import UrbanSoundDataset
 
@@ -20,12 +20,14 @@ label_mapping = {
 }
 
 def predict(model, test_dl, device, label_mapping):
+    num_items_test = len(test_dl.dataset)
+    print("Độ dài của test_dl:", num_items_test)
     correct_prediction = 0
     total_prediction = 0
 
     with torch.no_grad():
-        for data in test_dl:
-            inputs, labels = data[0].to(device), data[1].to(device)
+        for i, (inputs, labels) in enumerate(test_dl):
+            inputs, labels = inputs.to(device), labels.to(device)
 
             inputs_m, inputs_s = inputs.mean(), inputs.std()
             inputs = (inputs - inputs_m) / inputs_s
@@ -37,10 +39,14 @@ def predict(model, test_dl, device, label_mapping):
             predicted_labels = [label_mapping[p.item()] for p in prediction]
             actual_labels = [label_mapping[l.item()] for l in labels]
 
-            audio_paths = [df.loc[index, 'relative_path'] for index in test_dl.dataset.indices]
+            audio_paths = [df.loc[index, 'relative_path'] for index in
+                           test_dl.dataset.indices[i * test_dl.batch_size: (i + 1) * test_dl.batch_size]]
 
-            for audio_path, predicted_label, actual_label in zip(audio_paths, predicted_labels, actual_labels):
-                print(f"Audio Path: {audio_path}, Predicted: {predicted_label}, Actual: {actual_label}")
+            audio_info = zip(audio_paths, predicted_labels, actual_labels)
+            audio_info = itertools.islice(audio_info, len(inputs))  # Chỉ lấy số lượng file tương ứng với batch hiện tại
+
+            for audio_path, predicted_label, actual_label in audio_info:
+                print(f"i: {i + 1}, Audio Path: {audio_path}, Predicted: {predicted_label}, Actual: {actual_label}")
 
             correct_prediction += (prediction == labels).sum().item()
             total_prediction += prediction.shape[0]
